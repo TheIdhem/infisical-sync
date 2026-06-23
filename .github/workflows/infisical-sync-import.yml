@@ -1,0 +1,92 @@
+name: "[Infisical] Sync — Batch Import"
+
+run-name: "Infisical Batch Import: ${{ inputs.environment }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment or category to sync
+        type: choice
+        required: true
+        options:
+          - "choose one"
+          - development
+          - sandbox
+          - production
+      credential_prefix:
+        description: AWS secret/parameter name prefix (e.g. theidhem)
+        type: string
+        required: false
+        default: "theidhem-test"
+      cleanup:
+        description: Run cleanup instead of sync
+        type: boolean
+        required: false
+        default: false
+      dry_run:
+        description: Dry run (no API calls)
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: infisical-sync-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync ${{ inputs.environment }}
+    runs-on: ubuntu-22.04
+    if: inputs.environment != 'choose one'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build infisical-sync
+        run: go build -o infisical-sync .
+
+      - name: Manual Approval
+        if: inputs.cleanup == true || inputs.environment == 'sandbox' || inputs.environment == 'production'
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ secrets.GITHUB_ACTION_PAT }}
+          approvers: TheIdhem
+          minimum-approvals: ${{ (inputs.environment == 'sandbox' || inputs.environment == 'production') && '2' || '1' }}
+          issue-title: >-
+            ${{ (inputs.environment == 'sandbox' || inputs.environment == 'production')
+              && format('Infisical Sync targeting {0} — approval required', inputs.environment)
+              || format('Infisical Cleanup: {0}', inputs.environment) }}
+          issue-body: >-
+            ${{ format('**Environment:** {0} | **Cleanup:** {1} | **Dry run:** {2} | Triggered by @{3}',
+              inputs.environment, inputs.cleanup, inputs.dry_run, github.actor) }}
+          exclude-workflow-initiator-as-approver: false
+          fail-on-denial: true
+          additional-approved-words: "LFG"
+          additional-denied-words: ""
+
+      - name: Run infisical-sync
+        env:
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          INFISICAL_AWS_ROLE_NAME: ${{ secrets.INFISICAL_AWS_ROLE_NAME }}
+        run: |
+          FLAGS="--env ${{ inputs.environment }} \
+            --csv seeds/secrets-inventory.csv \
+            --group-vars-dir ../../infra/ansible/group_vars"
+
+          if [ -n "${{ inputs.credential_prefix }}" ]; then
+            FLAGS="$FLAGS --credential-prefix ${{ inputs.credential_prefix }}"
+          fi
+          if [ "${{ inputs.cleanup }}" = "true" ]; then
+            FLAGS="$FLAGS --cleanup"
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            FLAGS="$FLAGS --dry-run"
+          fi
+
+          eval ./infisical-sync $FLAGS
